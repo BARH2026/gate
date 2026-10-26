@@ -459,10 +459,85 @@ def write_outputs(data, edge_hosts):
     with open(html_path, "w", encoding="utf-8") as f:
         f.write(html)
 
+    nodes_text = build_nodes_text(data, edge_hosts)
     nodes_path = os.path.join(PUBLIC_DIR, "nodes.txt")
     with open(nodes_path, "w", encoding="utf-8") as f:
-        f.write(build_nodes_text(data, edge_hosts))
+        f.write(nodes_text)
 
+    # 1. 生成 sub.txt (Base64 订阅，适用于 v2rayN / Shadowrocket)
+    import base64
+    sub_lines = []
+    clash_proxies = []
+    clash_names = []
+    
+    # 提取所有存活的住宅与可用节点
+    countries = data.get("countries", {})
+    for cname, grp in sorted(countries.items(), key=lambda kv: (-int(kv[1].get("count") or 0), str(kv[1].get("code") or kv[0]))):
+        code = str(grp.get("code") or "?").upper()
+        zh = COUNTRY_ZH.get(code) or cname
+        res_nodes = [n for n in grp.get("nodes", []) if n.get("residential") == "residential"]
+        other_nodes = [n for n in grp.get("nodes", []) if n.get("residential") != "residential"]
+        
+        for i, n in enumerate(res_nodes, 1):
+            name = f"{zh}-住宅-{i:02d}"
+            host = n['host']
+            port = n['port']
+            # 标准 VLESS 格式与 SSTP 代理链
+            vless_url = f"sstp://vpn:vpn@{host}:{port}#{name}"
+            sub_lines.append(vless_url)
+            clash_names.append(name)
+            clash_proxies.append(f"  - name: "{name}"\n    type: socks5\n    server: {host}\n    port: {port}")
+            
+        for i, n in enumerate(other_nodes, 1):
+            name = f"{zh}-机房-{i:02d}"
+            host = n['host']
+            port = n['port']
+            vless_url = f"sstp://vpn:vpn@{host}:{port}#{name}"
+            sub_lines.append(vless_url)
+            clash_names.append(name)
+            clash_proxies.append(f"  - name: "{name}"\n    type: socks5\n    server: {host}\n    port: {port}")
+
+    sub_b64 = base64.b64encode("\n".join(sub_lines).encode("utf-8")).decode("utf-8")
+    sub_path = os.path.join(PUBLIC_DIR, "sub.txt")
+    with open(sub_path, "w", encoding="utf-8") as f:
+        f.write(sub_b64)
+
+    # 2. 生成 clash.yaml 基础配置
+    clash_yaml = f"""port: 7890
+socks-port: 7891
+allow-lan: false
+mode: rule
+log-level: info
+external-controller: 127.0.0.1:9090
+
+proxies:
+""" + "\n".join(clash_proxies) + f"""
+
+proxy-groups:
+  - name: 🚀 自动选择
+    type: url-test
+    url: http://www.gstatic.com/generate_204
+    interval: 300
+    tolerance: 50
+    proxies:
+""" + "\n".join([f"      - "{n}"" for n in clash_names]) + f"""
+  - name: 🔰 节点选择
+    type: select
+    proxies:
+      - 🚀 自动选择
+""" + "\n".join([f"      - "{n}"" for n in clash_names]) + f"""
+
+rules:
+  - DOMAIN-SUFFIX,google.com,🔰 节点选择
+  - DOMAIN-SUFFIX,youtube.com,🔰 节点选择
+  - DOMAIN-SUFFIX,github.com,🔰 节点选择
+  - MATCH,DIRECT
+"""
+    clash_path = os.path.join(PUBLIC_DIR, "clash.yaml")
+    with open(clash_path, "w", encoding="utf-8") as f:
+        f.write(clash_yaml)
+
+    log("OUTPUT", f"成功生成 sub.txt (Base64) 与 clash.yaml (Clash 订阅)")
     return data_path, html_path, nodes_path
 
 # ---------------------------------------------------------------------------
